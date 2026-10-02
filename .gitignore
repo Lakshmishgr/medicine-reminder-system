@@ -1,0 +1,7 @@
+target/
+backup_before_web/
+*.class
+.idea/
+*.iml
+.vscode/
+.DS_Store
