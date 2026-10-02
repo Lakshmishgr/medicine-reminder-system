@@ -4,6 +4,7 @@ import java.time.format.DateTimeFormatter;
 
 import com.twilio.Twilio;
 import com.twilio.rest.api.v2010.account.Message;
+import com.twilio.type.PhoneNumber;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
@@ -11,15 +12,12 @@ import static spark.Spark.*;
 
 public class MedicineReminderSystem {
 
-    // ------------------------------------------------------------
-    //  INSERT YOUR TWILIO CREDENTIALS BACK HERE
-    // ------------------------------------------------------------
-   
+    // Twilio configuration loaded dynamically from system environment variables
     public static final String ACCOUNT_SID = System.getenv().getOrDefault("TWILIO_ACCOUNT_SID", "YOUR_ACCOUNT_SID");
     public static final String AUTH_TOKEN = System.getenv().getOrDefault("TWILIO_AUTH_TOKEN", "YOUR_AUTH_TOKEN");
-    public static final String FROM_NUMBER = System.getenv().getOrDefault("TWILIO_FROM_NUMBER", "YOUR_TWILIO_NUMBER");
-    // ------------------------------------------------------------
+    public static final String FROM_NUMBER = System.getenv().getOrDefault("TWILIO_FROM_NUMBER", "+18455529994");
 
+    // Suppress verbose Spark/SLF4J internal logs
     static {
         System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "off");
         System.setProperty("org.slf4j.simpleLogger.showDateTime", "false");
@@ -28,6 +26,7 @@ public class MedicineReminderSystem {
         System.setProperty("org.slf4j.impl.StaticLoggerBinder", "false");
     }
 
+    // Medicine reminder data model
     static class MedicineReminder {
         String medicineName;
         String time;
@@ -45,14 +44,11 @@ public class MedicineReminderSystem {
         }
     }
 
-    // ============================================================
-    //                DYNAMIC CIRCULAR QUEUE
-    // ============================================================
-
+    // Circular queue to manage scheduled medicine reminders
     static class ReminderQueue {
         private MedicineReminder[] arr;
         private int front, rear, size, capacity;
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm");
+        private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("HH:mm");
 
         ReminderQueue() {
             capacity = 5;
@@ -80,7 +76,6 @@ public class MedicineReminderSystem {
             capacity = newCap;
             front = 0;
             rear = size - 1;
-            System.out.println("Queue resized. New Capacity: " + capacity);
         }
 
         synchronized void addReminder(MedicineReminder r) {
@@ -100,6 +95,7 @@ public class MedicineReminderSystem {
         synchronized List<MedicineReminder> listAll() {
             List<MedicineReminder> out = new ArrayList<>();
             if (isEmpty()) return out;
+
             int idx = front;
             while (true) {
                 out.add(arr[idx]);
@@ -122,10 +118,8 @@ public class MedicineReminderSystem {
 
         synchronized boolean removeByName(String name) {
             int idx = findIndexByName(name);
-            if (idx == -1) {
-                System.out.println("Not found: " + name);
-                return false;
-            }
+            if (idx == -1) return false;
+
             removeByIndex(idx);
             System.out.println("Removed: " + name);
             return true;
@@ -138,15 +132,13 @@ public class MedicineReminderSystem {
             try {
                 LocalTime t = LocalTime.parse(r.time, formatter);
                 r.time = t.plusMinutes(mins).format(formatter);
-                System.out.println("Snoozed '" + r.medicineName + "' → New time: " + r.time);
+                System.out.println("Snoozed '" + r.medicineName + "' -> New time: " + r.time);
             } catch (Exception e) {
-                System.out.println("Invalid time: " + r.time);
+                System.out.println("Invalid time format: " + r.time);
             }
         }
 
-        // ============================================================
-        //  FIXED VERSION — Removes reminders instantly after SMS
-        // ============================================================
+        // Process queue and dispatch notifications for current time match
         synchronized void checkAndSend() {
             if (isEmpty()) return;
 
@@ -155,7 +147,6 @@ public class MedicineReminderSystem {
             int count = size;
 
             while (count > 0 && !isEmpty()) {
-
                 MedicineReminder r = arr[idx];
                 boolean shouldRemove = false;
 
@@ -196,27 +187,21 @@ public class MedicineReminderSystem {
             }
         }
 
-        void sendNotification(MedicineReminder r) {
-            String patientMsg =
-                    "💊 Medicine: " + r.medicineName + "\n" +
-                    "⚠️ Risk: " + r.riskMessage + "\n" +
-                    "⏰ Time: " + r.time + "\n" +
-                    "Please take it now.";
+        private void sendNotification(MedicineReminder r) {
+            String patientMsg = String.format(
+                "💊 Medicine: %s\n⚠️ Risk: %s\n⏰ Time: %s\nPlease take it now.",
+                r.medicineName, r.riskMessage, r.time
+            );
 
-            String caretakerMsg =
-                    "👩‍⚕️ Caregiver Alert"+"\n" +
-                    "Patient: " + r.patientNumber + "\n" +
-                    "💊 Medicine: " + r.medicineName + "\n" +
-                    "⚠️ Risk: " + r.riskMessage + "\n" +
-                    "⏰ Time: " + r.time;
+            String caretakerMsg = String.format(
+                "👩‍⚕️ Caregiver Alert\nPatient: %s\n💊 Medicine: %s\n⚠️ Risk: %s\n⏰ Time: %s",
+                r.patientNumber, r.medicineName, r.riskMessage, r.time
+            );
 
             sendSms(r.patientNumber, patientMsg);
             sendSms(r.caretakerNumber, caretakerMsg);
 
-            System.out.println("✅ SMS sent → Medicine: " + r.medicineName +
-                    " | Risk: " + r.riskMessage +
-                    " | Patient: " + r.patientNumber +
-                    " | Caretaker: " + r.caretakerNumber);
+            System.out.println("✅ Notifications sent for: " + r.medicineName);
         }
     }
 
@@ -225,33 +210,36 @@ public class MedicineReminderSystem {
     static Thread reminderThread = null;
     static volatile boolean running = false;
 
+    // Dispatches SMS using Twilio API (Formats 10-digit phone numbers automatically)
     public static void sendSms(String to, String msg) {
-    try {
-        // Automatically append +91 country code for Indian phone numbers if missing
-        if (to != null && !to.startsWith("+")) {
-            to = "+91" + to.trim();
+        if (to == null || to.isBlank()) return;
+
+        String recipient = to.trim();
+        if (!recipient.startsWith("+")) {
+            recipient = "+91" + recipient;
         }
 
-        Twilio.init(ACCOUNT_SID, AUTH_TOKEN);
-        Message message = Message.creator(
-                new com.twilio.type.PhoneNumber(to),
-                new com.twilio.type.PhoneNumber(FROM_NUMBER),
+        try {
+            Twilio.init(ACCOUNT_SID, AUTH_TOKEN);
+            Message.creator(
+                new PhoneNumber(recipient),
+                new PhoneNumber(FROM_NUMBER),
                 msg
-        ).create();
-
-        System.out.println("✅ Twilio Message Sent! SID: " + message.getSid());
-    } catch (Exception e) {
-        System.out.println("❌ SMS FAILED → To " + to + " | Error: " + e.getMessage());
+            ).create();
+            System.out.println("✅ SMS delivered to: " + recipient);
+        } catch (Exception e) {
+            System.out.println("❌ SMS delivery failed for " + recipient + " | Error: " + e.getMessage());
+        }
     }
-}
 
     static String json(Object o) { return gson.toJson(o); }
 
+    // Background thread runner checking schedule every 10 seconds
     public static void startReminderThread() {
         if (running) return;
         running = true;
         reminderThread = new Thread(() -> {
-            System.out.println("Reminder thread started (background).");
+            System.out.println("Reminder background process started.");
             while (running) {
                 try {
                     rq.checkAndSend();
@@ -269,10 +257,10 @@ public class MedicineReminderSystem {
     }
 
     public static void main(String[] args) {
-
         port(4567);
         staticFiles.location("/public");
 
+        // REST API routes
         get("/", (req, res) -> { res.redirect("/index.html"); return ""; });
 
         get("/api/reminders", (req, res) -> {
@@ -286,10 +274,10 @@ public class MedicineReminderSystem {
                 MedicineReminder m = gson.fromJson(req.body(), MedicineReminder.class);
                 if (m == null || m.medicineName == null) throw new Exception("Invalid payload");
                 rq.addReminder(m);
-                return json(Map.of("status","ok"));
+                return json(Map.of("status", "ok"));
             } catch (Exception e) {
                 res.status(400);
-                return json(Map.of("status","error","message", e.getMessage()));
+                return json(Map.of("status", "error", "message", e.getMessage()));
             }
         });
 
@@ -302,7 +290,7 @@ public class MedicineReminderSystem {
         post("/api/reminders/:name/snooze", (req, res) -> {
             String name = req.params(":name");
             Map payload = gson.fromJson(req.body(), Map.class);
-            int mins = ((Number)payload.getOrDefault("minutes", 0)).intValue();
+            int mins = ((Number) payload.getOrDefault("minutes", 0)).intValue();
             int idx = rq.findIndexByName(name);
             rq.snoozeAtIndex(idx, mins);
             return json(Map.of("snoozed", true));
@@ -315,11 +303,11 @@ public class MedicineReminderSystem {
 
         startReminderThread();
 
-        System.out.println("Web UI ready at http://localhost:4567");
+        System.out.println("Web dashboard active at http://localhost:4567");
         try {
             java.awt.Desktop.getDesktop().browse(new java.net.URI("http://localhost:4567"));
-        } catch (Exception e) { 
-            System.out.println("Unable to open browser: " + e); 
+        } catch (Exception e) {
+            System.out.println("Could not open browser automatically: " + e.getMessage());
         }
     }
 }
