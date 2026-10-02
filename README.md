@@ -19,3 +19,12 @@ A Java-based web application with SMS notification capabilities designed to remi
    ```bash
    git clone [https://github.com/YOUR_GITHUB_USERNAME/medicine-reminder-system.git](https://github.com/YOUR_GITHUB_USERNAME/medicine-reminder-system.git)
    cd medicine-reminder-system
+   ```mermaid
+graph TD
+    A[Web UI / User Input] -->|HTTP POST| B[Spark Java Server]
+    B -->|Enqueue Task| C[Circular Reminder Queue]
+    C -->|Background Scheduler| D{Match Current Time?}
+    D -- Yes --> E[Twilio API]
+    E -->|SMS Alert| F[Patient]
+    E -->|Caregiver Alert| G[Caretaker]
+    D -- No --> C
